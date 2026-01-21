@@ -12,10 +12,10 @@ from sqlalchemy import text
 from a_stock_analyzer import db as adb
 from a_stock_analyzer.indicators import calc_indicators
 from a_stock_analyzer.levels import calc_levels
-from a_stock_analyzer.scoring_v3 import calc_score_v3
 from a_stock_analyzer.settings import Settings
 
 from . import db as mdb
+from .laowang_scoring import calc_score_v3
 
 
 def _json_is_risk_filtered(tags_str: object) -> bool:

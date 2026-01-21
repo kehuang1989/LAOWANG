@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import Column, Float, Index, Integer, MetaData, String, Table, Text, create_engine, event, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine.url import make_url
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -37,6 +39,54 @@ def _connect_args_for_url(url: str) -> dict:
     if url.startswith("sqlite:///"):
         return {"check_same_thread": False}
     return {}
+
+
+def ensure_database(db: str) -> None:
+    """
+    Ensure the target MySQL database exists (CREATE DATABASE IF NOT EXISTS).
+    SQLite targets are created lazily when the file is opened.
+    """
+    url = normalize_db_url(db)
+    try:
+        parsed = make_url(url)
+    except Exception:  # noqa: BLE001
+        return
+
+    if parsed.get_backend_name() != "mysql":
+        return
+
+    database = (parsed.database or "").strip()
+    if not database:
+        return
+
+    safe_db = database.replace("`", "")
+    charset = parsed.query.get("charset", "utf8mb4")
+    charset_safe = "".join(ch for ch in str(charset) if ch.isalnum() or ch in {"_", "-"})
+    if not charset_safe:
+        charset_safe = "utf8mb4"
+
+    server_url = parsed.set(database=None)
+    server_url_str = str(server_url)
+    try:
+        engine = create_engine(
+            server_url_str,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=1,
+            max_overflow=0,
+            connect_args=_connect_args_for_url(server_url_str),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Unable to ensure MySQL database (connect failed): %s", exc)
+        return
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{safe_db}` CHARACTER SET {charset_safe}"))
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Unable to ensure MySQL database '%s': %s", safe_db, exc)
+    finally:
+        engine.dispose()
 
 
 def make_engine(

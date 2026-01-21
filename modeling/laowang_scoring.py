@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .settings import Settings
+from a_stock_analyzer.settings import Settings
 
 
 @dataclass(frozen=True)

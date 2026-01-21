@@ -32,6 +32,9 @@ python everyday.py --config config.ini
 python init.py --config config.ini
 ```
 
+> 提示：`init.py` / `astock_analyzer.py init-db` 会自动执行 `CREATE DATABASE IF NOT EXISTS`，
+> 只要数据库账号具备建库权限，就能“一键初始化”，无需再手工导入 SQL。
+
 等价（核心表）：
 
 ```bash
@@ -82,6 +85,14 @@ python models_update.py --config config.ini --only laowang --workers 64 update
 python models_update.py --config config.ini --only fhkq --workers 64 update
 ```
 
+如需“只补某个时间段”，可叠加 `--start-date/--end-date`（支持 `YYYYMMDD` 或 `YYYY-MM-DD`）：
+
+```bash
+python models_update.py --config config.ini --only both --workers 64 update --start-date 20240101 --end-date 20240331
+```
+
+> 提示：`update/full` 命令会显示跨交易日的 tqdm 进度条，方便查看剩余批量。
+
 ### 5.3 全量重算（慢）
 对 `stock_daily` 中所有交易日重算并覆盖写入 `model_*`：
 
@@ -90,6 +101,12 @@ python models_update.py --config config.ini --only both --workers 128 --laowang-
 ```
 
 > 说明：`models_update.py` 允许 `full/update/init-tables` 写在参数任意位置（例如 `... full --workers 64` 也能跑）。
+
+也可以限制时间段（不会清空整个 `model_runs`，而是覆盖式写入选定交易日）：
+
+```bash
+python models_update.py --config config.ini --only both --workers 96 full --start-date 20220101 --end-date 20220131
+```
 
 ### 5.4 强制重算某一天（不改代码的办法）
 如果某日结果明显异常（例如行数很少），通常是当天 `stock_daily/score_v3` 尚未完整。可删除该日 run 记录后再跑增量：

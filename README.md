@@ -19,6 +19,7 @@
 1) 配置 MySQL：编辑 `config.ini`（推荐写 `db_url`）
 2) 初始化表结构：
    - `python init.py --config config.ini`
+   - （自动执行 `CREATE DATABASE IF NOT EXISTS`，无需手动跑 SQL）
 3) 首次跑数（可能较慢）：
    - `python astock_analyzer.py --config config.ini run --start-date 20000101 --end-date YYYYMMDD --workers 16`
 4) 每日收盘后（增量更新 K 线 + 物化模型输出 + 导出 bingwu CSV）：
@@ -32,11 +33,21 @@
 - bingwu：
   - `python bingwu_report.py --trade-date YYYYMMDD --output outputs/bingwu_YYYYMMDD.csv`
 
+## 模型物化 CLI（LAOWANG/FHKQ → MySQL）
+- 增量补齐（自动识别缺少的交易日）：
+  - `python models_update.py --config config.ini --only both --workers 64 update`
+- 指定时间段（同样多线程、带 tqdm 进度条）：
+  - `python models_update.py --config config.ini --only both --workers 64 update --start-date 20240101 --end-date 20240331`
+- 全量/回溯重算（可选限定时间段；覆盖写入 `model_*`）：
+  - `python models_update.py --config config.ini --only both --workers 96 full`
+  - `python models_update.py --config config.ini --only both --workers 96 full --start-date 20220101 --end-date 20220131`
+
 ## 本地 Web UI（可选）
 - 启动：`python ui.py --config config.ini`
 - 功能：
   - 选择交易日查看 LAOWANG / FHKQ 表格（来自 MySQL `model_*`）
   - 若所选交易日已存在 `stock_daily` 但未计算 `model_*`，UI 会自动补算并显示运行状态
+  - LAOWANG 表新增 `status_tags` 徽章列，直接展示评分标签
   - 15:05 收盘后的“增量更新”建议用任务计划/cron 运行 `python everyday.py --config config.ini`
 
 ## 数据库与排错

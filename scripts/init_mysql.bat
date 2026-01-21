@@ -6,8 +6,8 @@ if not "%~1"=="" set CONFIG=%~1
 
 echo [init] Using config: %CONFIG%
 
-REM Note: This assumes the target database already exists.
-REM If you need to create database + tables from scratch, use sql/schema_mysql.sql.
+REM init.py will CREATE DATABASE IF NOT EXISTS (requires account with create privilege).
+REM sql/schema_mysql.sql remains available if you prefer to run pure SQL manually.
 
 python init.py --config %CONFIG%
 

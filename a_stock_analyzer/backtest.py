@@ -17,8 +17,8 @@ from tqdm import tqdm
 from . import db
 from .indicators import calc_indicators
 from .levels import calc_levels
-from .scoring_v3 import calc_score_v3
 from .settings import Settings
+from modeling.laowang_scoring import calc_score_v3
 
 
 @dataclass(frozen=True)

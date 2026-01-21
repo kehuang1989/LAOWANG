@@ -226,6 +226,8 @@ HTML_PAGE = r"""<!doctype html>
       }
       .pill.err { border-color: rgba(255,85,119,0.35); background: rgba(255,85,119,0.10); }
       .pill.warn { border-color: rgba(255,204,102,0.35); background: rgba(255,204,102,0.10); }
+      .tag-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
+      .tag-pill { font-size: 11px; padding: 2px 6px; }
 
       .right { text-align: right; }
     </style>
@@ -341,9 +343,25 @@ HTML_PAGE = r"""<!doctype html>
           const tr = document.createElement("tr");
           cols.forEach(c => {
             const td = document.createElement("td");
-            let v = r[c];
-            if (v === null || v === undefined) v = "";
-            td.textContent = String(v);
+            const v = r[c];
+            if (Array.isArray(v)) {
+              if (v.length) {
+                const wrap = document.createElement("div");
+                wrap.className = "tag-wrap";
+                v.forEach(tag => {
+                  const pill = document.createElement("span");
+                  pill.className = "pill tag-pill";
+                  pill.textContent = String(tag);
+                  wrap.appendChild(pill);
+                });
+                td.appendChild(wrap);
+              } else {
+                td.textContent = "";
+              }
+            } else {
+              const val = (v === null || v === undefined) ? "" : v;
+              td.textContent = String(val);
+            }
             tr.appendChild(td);
           });
           tbody.appendChild(tr);
@@ -549,6 +567,23 @@ HTML_PAGE = r"""<!doctype html>
 """
 
 
+def _parse_status_tags(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw if str(x).strip()]
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            data = None
+        if isinstance(data, list):
+            return [str(x) for x in data if str(x).strip()]
+        cleaned = raw.strip()
+        return [cleaned] if cleaned else []
+    return []
+
+
 def _json(handler: BaseHTTPRequestHandler, obj: Any, *, status: int = 200) -> None:
     b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(int(status))
@@ -714,12 +749,13 @@ class AppState:
                 "support_level",
                 "resistance_level",
                 "total_score",
+                "status_tags",
             ]
             with self.engine.connect() as conn:
                 rows = conn.execute(
                     text(
                         """
-                        SELECT rank_no, stock_code, stock_name, close, support_level, resistance_level, total_score
+                        SELECT rank_no, stock_code, stock_name, close, support_level, resistance_level, total_score, status_tags
                         FROM model_laowang_pool
                         WHERE trade_date = :d
                         ORDER BY rank_no ASC
@@ -729,7 +765,18 @@ class AppState:
                 ).fetchall()
             out_rows: List[Dict[str, Any]] = []
             for r in rows:
-                out_rows.append({c: (r[i] if i < len(r) else None) for i, c in enumerate(cols)})
+                mapping = getattr(r, "_mapping", None)
+                row_dict: Dict[str, Any] = {}
+                for i, c in enumerate(cols):
+                    if mapping is not None and c in mapping:
+                        val = mapping[c]
+                    else:
+                        val = r[i] if i < len(r) else None
+                    if c == "status_tags":
+                        row_dict[c] = _parse_status_tags(val)
+                    else:
+                        row_dict[c] = val
+                out_rows.append(row_dict)
 
             st = self._run_status(trade_date)["models"].get("laowang", {})
             msg = f"status={st.get('status','')} rows={st.get('row_count',0)}"
@@ -765,7 +812,14 @@ class AppState:
                 ).fetchall()
             out_rows2: List[Dict[str, Any]] = []
             for r in rows:
-                out_rows2.append({c: (r[i] if i < len(r) else None) for i, c in enumerate(cols)})
+                mapping = getattr(r, "_mapping", None)
+                row_dict2: Dict[str, Any] = {}
+                for i, c in enumerate(cols):
+                    if mapping is not None and c in mapping:
+                        row_dict2[c] = mapping[c]
+                    else:
+                        row_dict2[c] = r[i] if i < len(r) else None
+                out_rows2.append(row_dict2)
 
             st = self._run_status(trade_date)["models"].get("fhkq", {})
             msg = f"status={st.get('status','')} rows={st.get('row_count',0)}"

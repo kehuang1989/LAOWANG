@@ -11,6 +11,7 @@ from .settings import Settings
 
 
 def init_db(db_target: str) -> None:
+    db.ensure_database(db_target)
     engine = db.make_engine(db_target, pool_size=5, max_overflow=10)
     db.init_db(engine)
     logging.info("DB initialized: %s", db_target)
@@ -26,4 +27,3 @@ def update_daily_and_score_v3(
 ) -> None:
     settings = Settings(db=db_target, start_date=start_date, end_date=end_date, workers=workers)
     run_pipeline(settings, limit_stocks=limit_stocks)
-

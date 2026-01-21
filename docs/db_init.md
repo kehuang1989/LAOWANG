@@ -43,9 +43,14 @@ FLUSH PRIVILEGES;
 
 ## 3) 初始化表结构（只需一次）
 
-推荐（脚本方式；要求数据库已存在）：
+推荐（脚本方式；账号具备建库权限即可）：
 
-- `python init.py --config config.ini`
+```bash
+python init.py --config config.ini
+```
+
+> 提示：`init.py` / `astock_analyzer.py init-db` 会自动执行 `CREATE DATABASE IF NOT EXISTS`，
+> 因此只要账号有建库权限即可“一键初始化”，无需手动导入 SQL。
 
 等价命令：
 
@@ -54,7 +59,7 @@ python astock_analyzer.py --config config.ini init-db
 python models_update.py --config config.ini init-tables
 ```
 
-如果你希望用纯 SQL 一次性建库建表：
+如果你希望用纯 SQL 一次性建库建表（例如没有建库权限）：
 
 ```bash
 mysql -u astock -p -h 127.0.0.1 -P 3306 < sql/schema_mysql.sql

@@ -8,6 +8,10 @@ Commands:
 - init-tables: create model_runs + each model's output table (idempotent)
 - update: incremental update (smart; no date args needed)
 - full: full recompute (all trading days in stock_daily; can be slow)
+
+Flags:
+- --start-date/--end-date limit the trade date range for update/full
+- tqdm progress bars show cross-date execution progress
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--only", default="both", choices=["both", "laowang", "fhkq"])
     p.add_argument("--laowang-top", type=int, default=200)
     p.add_argument("--laowang-min-score", type=float, default=0.0)
+    p.add_argument("--start-date", default=None, help="YYYYMMDD or YYYY-MM-DD (optional)")
+    p.add_argument("--end-date", default=None, help="YYYYMMDD or YYYY-MM-DD (optional)")
 
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init-tables", help="Create model tables (idempotent)")
@@ -81,11 +87,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.cmd == "update":
-        update_models(engine=engine, models=models, workers=int(args.workers))
+        update_models(
+            engine=engine,
+            models=models,
+            workers=int(args.workers),
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
         return 0
 
     if args.cmd == "full":
-        full_recompute(engine=engine, models=models, workers=int(args.workers))
+        full_recompute(
+            engine=engine,
+            models=models,
+            workers=int(args.workers),
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
         return 0
 
     return 2

@@ -17,8 +17,8 @@ from .akshare_client import (
 )
 from .indicators import calc_indicators
 from .levels import calc_levels
-from .scoring_v3 import calc_score_v3
 from .settings import Settings
+from modeling.laowang_scoring import calc_score_v3
 
 
 def run_pipeline(settings: Settings, limit_stocks: Optional[int] = None) -> None:

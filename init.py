@@ -5,6 +5,7 @@ init.py
 Cross-platform initializer for this project (MySQL only).
 
 What it does (idempotent):
+- Create target MySQL database automatically (if it does not exist yet)
 - Create core tables/views via a_stock_analyzer (stock_daily / indicators / scores...)
 - Create materialized model tables via modeling (model_runs / model_laowang_pool / model_fhkq)
 
@@ -68,4 +69,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
