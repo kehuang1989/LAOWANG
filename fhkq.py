@@ -1,62 +1,167 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+fhkq.py
+
+功能：根据数据库中的 K 线数据，按交易日计算 FHKQ 连板开板/反抽信号，并写入 model_fhkq。
+- 支持 start-date / end-date
+- 单文件实现，按交易日串行、候选股并行，带进度条
+"""
 
 from __future__ import annotations
 
+try:
+    import sitecustomize  # noqa: F401
+except Exception:
+    pass
+
 import argparse
+import datetime as dt
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import bindparam, text
-
-from a_stock_analyzer import db
-from a_stock_analyzer.runtime import (
-    add_db_args,
-    make_engine_for_workers,
-    normalize_trade_date,
-    resolve_db_from_args,
-    resolve_latest_stock_daily_date,
-    setup_logging,
-    write_dataframe_csv,
-    yyyymmdd_from_date,
-)
+from sqlalchemy import text
+from sqlalchemy.engine import Engine, create_engine
 
 
-OUTPUT_COLUMNS = [
-    "trade_date",
-    "stock_code",
-    "stock_name",
-    "consecutive_limit_down",
-    "last_limit_down",
-    "volume_ratio",
-    "amount_ratio",
-    "open_board_flag",
-    "liquidity_exhaust",
-    "fhkq_score",
-    "fhkq_level",
-]
+DEFAULT_DB = "data/stock.db"
 
 
-STRATEGY_POSITIONING = """\
-本模块是【极端情绪博弈模型】：
-- 不用于中长期持仓
-- 建议：A/B 级 -> 人工确认；仓位 <= 常规策略的 20%
-"""
+@dataclass
+class MySQLConfig:
+    host: str = "127.0.0.1"
+    port: int = 3306
+    user: str = ""
+    password: str = ""
+    database: str = ""
+    charset: str = "utf8mb4"
 
 
-RISK_DISCLOSURE = """\
-风险声明：
-连续跌停博弈存在极高风险。本模块仅用于研究与辅助决策，不构成投资建议。
-"""
+@dataclass
+class AppConfig:
+    db_url: Optional[str] = None
+    mysql: MySQLConfig = field(default_factory=MySQLConfig)
 
 
-def _round_half_up_2(v: pd.Series) -> pd.Series:
-    arr = pd.to_numeric(v, errors="coerce").to_numpy(dtype=float)
+def load_config(path: Path) -> AppConfig:
+    import configparser
+
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    db_url = parser.get("database", "db_url", fallback=None)
+    db_url = db_url.strip() if db_url else None
+    mysql = MySQLConfig(
+        host=parser.get("mysql", "host", fallback="127.0.0.1").strip() or "127.0.0.1",
+        port=parser.getint("mysql", "port", fallback=3306),
+        user=parser.get("mysql", "user", fallback="").strip(),
+        password=parser.get("mysql", "password", fallback=""),
+        database=parser.get("mysql", "database", fallback="").strip(),
+        charset=parser.get("mysql", "charset", fallback="utf8mb4").strip() or "utf8mb4",
+    )
+    return AppConfig(db_url=db_url, mysql=mysql)
+
+
+def build_mysql_url(cfg: MySQLConfig) -> Optional[str]:
+    if not (cfg.user and cfg.database):
+        return None
+    from urllib.parse import quote_plus
+
+    user = quote_plus(cfg.user)
+    password = quote_plus(cfg.password or "")
+    auth = f"{user}:{password}" if password else user
+    return f"mysql+pymysql://{auth}@{cfg.host}:{int(cfg.port)}/{cfg.database}?charset={cfg.charset}"
+
+
+def resolve_db_target(args: argparse.Namespace) -> str:
+    if getattr(args, "db_url", None):
+        return str(args.db_url)
+    import os
+
+    env = os.getenv("ASTOCK_DB_URL")
+    if env and env.strip():
+        return env.strip()
+    if getattr(args, "db", None):
+        return str(args.db)
+    cfg_path = getattr(args, "config", None)
+    cfg_file = Path(cfg_path) if cfg_path else Path("config.ini")
+    if cfg_file.exists():
+        cfg = load_config(cfg_file)
+        if cfg.db_url:
+            return cfg.db_url
+        url = build_mysql_url(cfg.mysql)
+        if url:
+            return url
+    return DEFAULT_DB
+
+
+def make_engine(db_target: str, workers: int) -> Engine:
+    pool_size = max(5, min(32, workers * 2))
+    max_overflow = max(10, min(64, workers * 2))
+    connect_args = {}
+    if "://" not in db_target and db_target.endswith(".db"):
+        db_path = Path(db_target).expanduser().resolve()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_target = f"sqlite:///{db_path.as_posix()}"
+    if db_target.startswith("sqlite:///"):
+        connect_args["check_same_thread"] = False
+    engine = create_engine(
+        db_target,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        connect_args=connect_args,
+    )
+    if engine.dialect.name == "sqlite":
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _):  # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys = ON")
+            cur.execute("PRAGMA journal_mode = WAL")
+            cur.close()
+    return engine
+
+
+def parse_date_arg(value: str) -> str:
+    v = (value or "").strip()
+    if len(v) == 8 and v.isdigit():
+        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}"
+    try:
+        return dt.datetime.strptime(v, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError(f"Invalid date: {value}") from exc
+
+
+def list_trade_dates(engine: Engine, start_date: str, end_date: str) -> List[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT DISTINCT date FROM stock_daily WHERE date BETWEEN :s AND :e ORDER BY date"),
+            {"s": start_date, "e": end_date},
+        ).fetchall()
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def prev_trade_date(engine: Engine, trade_date: str) -> Optional[str]:
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT MAX(date) FROM stock_daily WHERE date < :d"), {"d": trade_date}).fetchone()
+    if not row or not row[0]:
+        return None
+    return str(row[0])
+
+
+# ------------------------- FHKQ 评分逻辑 -------------------------
+
+
+def _round_half_up_2(values: pd.Series) -> pd.Series:
+    arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
     out = np.floor(arr * 100.0 + 0.5) / 100.0
-    return pd.Series(out, index=v.index)
+    return pd.Series(out, index=values.index)
 
 
 def _infer_limit_pct(stock_code: str, stock_name: str, is_st_flag: bool) -> float:
@@ -76,8 +181,7 @@ def _is_st_name(stock_name: str) -> bool:
         return False
     if "退" in name:
         return True
-    up = name.upper()
-    return "ST" in up
+    return "ST" in name.upper()
 
 
 def _score_structure(consecutive_limit_down: int) -> int:
@@ -127,125 +231,80 @@ def _fhkq_level(score: float) -> str:
     return "D"
 
 
-def _calc_fhkq_for_one_stock(
-    df_daily_one: pd.DataFrame,
-    *,
-    trade_date: str,
-    stock_code: str,
-    stock_name: str,
-) -> Optional[Dict[str, Any]]:
-    """
-    df_daily_one: single-stock daily bars, sorted by date asc.
-    Required columns: date, open, high, low, close, volume, amount
-    """
+def _calc_fhkq_for_one_stock(df_daily_one: pd.DataFrame, trade_date: str, stock_code: str, stock_name: str) -> Optional[Dict[str, object]]:
     if df_daily_one is None or df_daily_one.empty:
         return None
-
     d = df_daily_one.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     d = d.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     d = d[d["date"] <= trade_date].reset_index(drop=True)
     if d.empty or str(d["date"].iloc[-1]) != trade_date:
         return None
-
     for c in ["open", "high", "low", "close", "volume", "amount"]:
-        if c not in d.columns:
-            raise ValueError(f"df_daily missing column: {c}")
         d[c] = pd.to_numeric(d[c], errors="coerce")
-
     is_st_flag = False
     if "is_st" in d.columns:
         try:
             is_st_flag = int(pd.to_numeric(d["is_st"], errors="coerce").fillna(0).iloc[-1]) == 1
         except Exception:  # noqa: BLE001
             is_st_flag = False
-
-    # Hard exclusions
     if is_st_flag or _is_st_name(stock_name):
         return None
-
     limit_pct = _infer_limit_pct(stock_code, stock_name, is_st_flag)
-    if "limit_down" not in d.columns:
-        prev_close = d["close"].shift(1)
-        d["limit_down"] = _round_half_up_2(prev_close * (1.0 - float(limit_pct)))
-    else:
-        d["limit_down"] = pd.to_numeric(d["limit_down"], errors="coerce")
-
+    prev_close = d["close"].shift(1)
+    d["limit_down"] = _round_half_up_2(prev_close * (1.0 - float(limit_pct)))
     eps = 1e-3
     is_limit_down = (d["close"] - d["limit_down"]).abs() <= eps
     is_limit_down = is_limit_down.fillna(False)
     if not bool(is_limit_down.iloc[-1]):
         return None
-
-    # Consecutive limit-down count (from trade_date backwards)
     consecutive = 0
     for v in is_limit_down.iloc[::-1].to_list():
         if bool(v):
             consecutive += 1
         else:
             break
-
-    # Focus only: 2+ consecutive limit-down
     if consecutive < 2:
         return None
-
-    # Filter: last 5 days all limit-down and all volume==0 (one-word lock)
     if len(d) >= 5:
         vol5 = pd.to_numeric(d["volume"], errors="coerce").fillna(0.0).tail(5)
         if bool(is_limit_down.tail(5).all()) and bool((vol5 == 0).all()):
             return None
-
-    # Filter: last 10-day cumulative drop > 60%
     if len(d) >= 10:
         c0 = float(d["close"].iloc[-10]) if pd.notna(d["close"].iloc[-10]) else np.nan
         c1 = float(d["close"].iloc[-1]) if pd.notna(d["close"].iloc[-1]) else np.nan
         if np.isfinite(c0) and np.isfinite(c1) and c0 > 0 and (c1 / c0 - 1.0) <= -0.60:
             return None
-
-    # Ratios: today vs last 5-day mean (including today, per spec)
     vol_today = float(d["volume"].iloc[-1]) if pd.notna(d["volume"].iloc[-1]) else 0.0
     amt_today = float(d["amount"].iloc[-1]) if pd.notna(d["amount"].iloc[-1]) else 0.0
     vol_mean5 = float(pd.to_numeric(d["volume"], errors="coerce").fillna(0.0).tail(5).mean())
     amt_mean5 = float(pd.to_numeric(d["amount"], errors="coerce").fillna(0.0).tail(5).mean())
-
     volume_ratio = float(vol_today / vol_mean5) if vol_mean5 > 0 else 0.0
     amount_ratio = float(amt_today / amt_mean5) if amt_mean5 > 0 else 0.0
-
-    # Open-board flag: prefer OHLC: limit-down close but intraday traded above limit-down.
     ld_today = float(d["limit_down"].iloc[-1]) if pd.notna(d["limit_down"].iloc[-1]) else np.nan
     high_today = float(d["high"].iloc[-1]) if pd.notna(d["high"].iloc[-1]) else np.nan
     low_today = float(d["low"].iloc[-1]) if pd.notna(d["low"].iloc[-1]) else np.nan
-
     open_board_flag = 0
     if np.isfinite(ld_today):
         if np.isfinite(high_today) and high_today > ld_today + eps:
             open_board_flag = 1
-        # Fallback to spec literal (rare; helps if high is missing/dirty)
         elif np.isfinite(low_today) and low_today < ld_today - eps:
             open_board_flag = 1
-
     liquidity_exhaust = int(consecutive >= 3 and volume_ratio >= 1.0 and open_board_flag == 1)
-
     structure_score = _score_structure(consecutive)
     volume_score = _score_volume_ratio(volume_ratio)
     amount_score = _score_amount_ratio(amount_ratio)
     open_board_score = 20 if open_board_flag == 1 else 0
     exhaust_score = 20 if liquidity_exhaust == 1 else 0
-
     score = float(structure_score + volume_score + amount_score + open_board_score + exhaust_score)
-
-    # Out-of-range penalty (spec: >6 risk up, score down)
     if consecutive > 6:
         penalty = min(20.0, float(consecutive - 6) * 5.0)
         score = max(0.0, score - penalty)
-
     score = float(max(0.0, min(100.0, score)))
     level = _fhkq_level(score)
-
     last_limit_down = 0
     if len(d) >= 2:
         last_limit_down = int(bool(is_limit_down.iloc[-2]))
-
     return {
         "trade_date": trade_date,
         "stock_code": str(stock_code),
@@ -261,245 +320,167 @@ def _calc_fhkq_for_one_stock(
     }
 
 
-def run_fhkq(df_daily: pd.DataFrame, trade_date: str) -> pd.DataFrame:
-    """
-    输入：标准日K DataFrame
-    输出：评分结果 DataFrame
-
-    支持两种形态：
-    1) 多股票：包含 stock_code 列（可选 stock_name / is_st / limit_down）
-    2) 单股票：仍需包含 stock_code（固定值）以便输出
-    """
-    if df_daily is None or df_daily.empty:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
-
-    if "stock_code" not in df_daily.columns:
-        raise ValueError("df_daily must include 'stock_code' column")
-    if "date" not in df_daily.columns:
-        raise ValueError("df_daily must include 'date' column")
-
-    trade_date_norm = normalize_trade_date(trade_date)
-
-    df = df_daily.copy()
-    if "stock_name" not in df.columns:
-        df["stock_name"] = ""
-
-    out_rows: list[Dict[str, Any]] = []
-    for code, grp in df.groupby("stock_code"):
-        name = str(grp["stock_name"].iloc[-1]) if "stock_name" in grp.columns else ""
-        row = _calc_fhkq_for_one_stock(
-            grp,
-            trade_date=trade_date_norm,
-            stock_code=str(code),
-            stock_name=name,
-        )
-        if row:
-            out_rows.append(row)
-
-    if not out_rows:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
-
-    out = pd.DataFrame(out_rows)
-    out = out[OUTPUT_COLUMNS]
-    out = out.sort_values(["fhkq_score", "consecutive_limit_down", "stock_code"], ascending=[False, False, True])
-    out = out.reset_index(drop=True)
-    return out
+# ------------------------- DB 辅助 -------------------------
 
 
-def run_fhkq_from_db(
-    *,
-    db_target: str,
-    trade_date: str,
-    output_csv: Path,
-    workers: int = 8,
-) -> pd.DataFrame:
-    trade_date_norm = normalize_trade_date(trade_date)
-
-    w = max(1, int(workers))
-    engine, w = make_engine_for_workers(db_target, w)
-
-    # Performance: do NOT load 120-day history for every stock.
-    # Prefilter candidates using only (today close, prev close) to find limit-down
-    # stocks, then bulk-load histories for candidates only.
-    with engine.connect() as conn:
-        prev = conn.execute(
-            text("SELECT MAX(date) FROM stock_daily WHERE date < :d"),
-            {"d": trade_date_norm},
-        ).fetchone()[0]
-    if not prev:
-        raise RuntimeError(f"Cannot resolve prev trade date for {trade_date_norm}")
-    prev = str(prev)
-
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT
-                  d.stock_code,
-                  COALESCE(i.name, '') AS stock_name,
-                  d.close AS close,
-                  p.close AS prev_close
-                FROM stock_daily d
-                INNER JOIN stock_daily p
-                  ON p.stock_code = d.stock_code AND p.date = :prev
-                LEFT JOIN stock_info i
-                  ON i.stock_code = d.stock_code
-                WHERE d.date = :d
-                """
-            ),
-            {"d": trade_date_norm, "prev": prev},
-        ).fetchall()
-
+def upsert_rows(engine: Engine, table: str, cols: Sequence[str], rows: Sequence[Dict[str, object]], key_cols: Sequence[str]) -> None:
     if not rows:
-        raise RuntimeError(f"No stock_daily rows found for trade_date={trade_date_norm}. Did you run pipeline?")
+        return
+    placeholders = ", ".join([f":{c}" for c in cols])
+    col_list = ", ".join(cols)
+    if engine.dialect.name == "sqlite":
+        stmt = f"INSERT OR REPLACE INTO {table}({col_list}) VALUES({placeholders})"
+    else:
+        updates = ", ".join([f"{c}=VALUES({c})" for c in cols if c not in key_cols])
+        stmt = f"INSERT INTO {table}({col_list}) VALUES({placeholders}) ON DUPLICATE KEY UPDATE {updates}"
+    with engine.begin() as conn:
+        conn.execute(text(stmt), rows)
 
-    eps = 1e-3
-    candidates: list[tuple[str, str]] = []
-    for r in rows:
-        code = str(r[0])
-        name = str(r[1] or "")
-        close = _to_float(r[2])
-        prev_close = _to_float(r[3])
-        if not (np.isfinite(close) and np.isfinite(prev_close) and prev_close > 0):
-            continue
-        if _is_st_name(name):
-            continue
-        limit_pct = float(_infer_limit_pct(code, name, False))
-        limit_down = float(_round_half_up_2(pd.Series([prev_close * (1.0 - limit_pct)])).iloc[0])
-        if abs(close - limit_down) <= eps:
-            candidates.append((code, name))
 
-    if not candidates:
-        out0 = pd.DataFrame(columns=OUTPUT_COLUMNS)
-        write_dataframe_csv(out0, output_csv, columns=OUTPUT_COLUMNS)
-        logging.info("Exported 0 rows -> %s", output_csv)
-        return out0
+def fetch_limit_down_candidates(engine: Engine, trade_date: str, prev_date: str) -> List[Tuple[str, str, float, float]]:
+    sql = """
+        SELECT d.stock_code,
+               COALESCE(i.name, '') AS stock_name,
+               d.close AS close,
+               p.close AS prev_close
+        FROM stock_daily d
+        INNER JOIN stock_daily p
+            ON p.stock_code = d.stock_code AND p.date = :prev
+        LEFT JOIN stock_info i
+            ON i.stock_code = d.stock_code
+        WHERE d.date = :d
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), {"d": trade_date, "prev": prev_date}).fetchall()
+    return [(str(r[0]), str(r[1] or ""), float(r[2]), float(r[3])) for r in rows if r and r[0] is not None]
 
-    hist_limit = 120
-    name_map = {c: n for c, n in candidates}
 
-    df_all = pd.DataFrame()
-    if engine.dialect.name == "mysql":
-        codes_only = [c for c, _n in candidates]
-        with engine.connect() as conn:
-            q = (
+def load_history_for_codes(engine: Engine, codes: Sequence[str], end_date: str, limit: int = 120) -> Dict[str, pd.DataFrame]:
+    out: Dict[str, pd.DataFrame] = {}
+    with engine.connect() as conn:
+        for code in codes:
+            rows = conn.execute(
                 text(
                     """
-                    SELECT stock_code, date, open, high, low, close, volume, amount
-                    FROM (
-                      SELECT
-                        sd.stock_code,
-                        sd.date,
-                        sd.open,
-                        sd.high,
-                        sd.low,
-                        sd.close,
-                        sd.volume,
-                        sd.amount,
-                        ROW_NUMBER() OVER (PARTITION BY sd.stock_code ORDER BY sd.date DESC) AS rn
-                      FROM stock_daily sd
-                      WHERE sd.stock_code IN :codes
-                        AND sd.date <= :d
-                    ) t
-                    WHERE t.rn <= :lim
-                    ORDER BY stock_code, date
+                    SELECT date, open, high, low, close, volume, amount
+                    FROM stock_daily
+                    WHERE stock_code = :c AND date <= :d
+                    ORDER BY date DESC
+                    LIMIT :lim
                     """
-                ).bindparams(bindparam("codes", expanding=True))
-            )
-            df_all = pd.read_sql_query(
-                q,
-                conn,
-                params={"codes": codes_only, "d": trade_date_norm, "lim": int(hist_limit)},
-            )
-    else:
-        parts: list[pd.DataFrame] = []
-        with engine.connect() as conn:
-            for code, _name in candidates:
-                hist = db.load_daily_until(conn, code, end_date=trade_date_norm, limit=hist_limit)
-                if hist is None or hist.empty:
-                    continue
-                hist = hist.copy()
-                hist["stock_code"] = code
-                parts.append(hist)
-        if parts:
-            df_all = pd.concat(parts, ignore_index=True).sort_values(["stock_code", "date"]).reset_index(drop=True)
-
-    if df_all is None or df_all.empty:
-        out0 = pd.DataFrame(columns=OUTPUT_COLUMNS)
-        write_dataframe_csv(out0, output_csv, columns=OUTPUT_COLUMNS)
-        logging.info("Exported 0 rows -> %s", output_csv)
-        return out0
-
-    for c in ["open", "high", "low", "close", "volume", "amount"]:
-        if c in df_all.columns:
-            df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
-
-    groups = list(df_all.groupby("stock_code", sort=False))
-
-    def process_stock(code: str, grp: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        try:
-            hist = grp[["date", "open", "high", "low", "close", "volume", "amount"]].copy()
-            return _calc_fhkq_for_one_stock(
-                hist,
-                trade_date=trade_date_norm,
-                stock_code=code,
-                stock_name=name_map.get(code, ""),
-            )
-        except Exception:  # noqa: BLE001
-            logging.exception("FHKQ failed: %s", code)
-            return None
-
-    out_rows: list[Dict[str, Any]] = []
-    if w <= 1:
-        for code, grp in groups:
-            r = process_stock(str(code), grp)
-            if r:
-                out_rows.append(r)
-    else:
-        w2 = min(int(w), len(groups), 64)
-        with ThreadPoolExecutor(max_workers=w2) as ex:
-            futures = [ex.submit(process_stock, str(code), grp) for code, grp in groups]
-            for f in as_completed(futures):
-                r = f.result()
-                if r:
-                    out_rows.append(r)
-
-    out = pd.DataFrame(out_rows, columns=OUTPUT_COLUMNS)
-    out = out.sort_values(["fhkq_score", "consecutive_limit_down", "stock_code"], ascending=[False, False, True])
-    out = out.reset_index(drop=True)
-    write_dataframe_csv(out, output_csv, columns=OUTPUT_COLUMNS)
-
-    logging.info("Exported %d rows -> %s", len(out), output_csv)
+                ),
+                {"c": code, "d": end_date, "lim": int(limit)},
+            ).fetchall()
+            if not rows:
+                continue
+            df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "amount"]).sort_values("date")
+            out[code] = df
     return out
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="fhkq.py - 连续跌停开板 / 反抽博弈评分模块")
-    p.add_argument("--log-level", default="INFO", help="Logging level")
-    add_db_args(p)
-    p.add_argument("--trade-date", default=None, help="YYYYMMDD or YYYY-MM-DD (default: latest stock_daily date)")
-    p.add_argument("--output", default=None, help="CSV output path (default: output/fhkq_YYYYMMDD.csv)")
-    p.add_argument("--workers", type=int, default=8, help="Thread workers (MySQL recommended)")
-    return p
+# ------------------------- 主流程 -------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    setup_logging(args.log_level)
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="FHKQ 连板博弈评分（单文件版）")
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--db-url", default=None)
+    parser.add_argument("--db", default=None)
+    parser.add_argument("--start-date", default="2020-01-01")
+    parser.add_argument("--end-date", default=dt.date.today().strftime("%Y-%m-%d"))
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args(argv)
 
-    db_target = resolve_db_from_args(args)
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 
-    trade_date = args.trade_date or resolve_latest_stock_daily_date(db_target)
-    trade_date_norm = normalize_trade_date(trade_date)
-    yyyymmdd = yyyymmdd_from_date(trade_date_norm)
-    output_csv = Path(args.output) if args.output else Path(f"output/fhkq_{yyyymmdd}.csv")
+    start = parse_date_arg(args.start_date)
+    end = parse_date_arg(args.end_date)
+    if start > end:
+        raise SystemExit("start-date 必须 <= end-date")
 
-    run_fhkq_from_db(
-        db_target=db_target,
-        trade_date=trade_date_norm,
-        output_csv=output_csv,
-        workers=args.workers,
-    )
+    db_target = resolve_db_target(args)
+    workers = max(1, int(args.workers))
+    engine = make_engine(db_target, workers)
+
+    trade_dates = list_trade_dates(engine, start, end)
+    if not trade_dates:
+        logging.warning("区间内没有交易日数据：%s~%s", start, end)
+        return 0
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+
+    outer_progress = tqdm(total=len(trade_dates), desc="FHKQ按日", unit="day")
+
+    for trade_date in trade_dates:
+        prev = prev_trade_date(engine, trade_date)
+        if not prev:
+            outer_progress.update(1)
+            continue
+        candidates = fetch_limit_down_candidates(engine, trade_date, prev)
+        filtered: List[Tuple[str, str]] = []
+        eps = 1e-3
+        for code, name, close, prev_close in candidates:
+            if not (np.isfinite(close) and np.isfinite(prev_close) and prev_close > 0):
+                continue
+            limit_pct = _infer_limit_pct(code, name, False)
+            limit_down = float(_round_half_up_2(pd.Series([prev_close * (1.0 - limit_pct)])).iloc[0])
+            if abs(close - limit_down) <= eps and not _is_st_name(name):
+                filtered.append((code, name))
+        if not filtered:
+            delete_by = text("DELETE FROM model_fhkq WHERE trade_date = :d")
+            with engine.begin() as conn:
+                conn.execute(delete_by, {"d": trade_date})
+            outer_progress.update(1)
+            continue
+        histories = load_history_for_codes(engine, [c for c, _ in filtered], trade_date, limit=150)
+        results: List[Dict[str, object]] = []
+        inner_progress = tqdm(total=len(filtered), desc=f"{trade_date}", unit="stock", leave=False)
+
+        def worker(code: str, name: str) -> Optional[Dict[str, object]]:
+            df = histories.get(code)
+            if df is None or df.empty:
+                return None
+            return _calc_fhkq_for_one_stock(df, trade_date=trade_date, stock_code=code, stock_name=name)
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(filtered))) as ex:
+            futs = {ex.submit(worker, code, name): (code, name) for code, name in filtered}
+            for fut in as_completed(futs):
+                inner_progress.update(1)
+                try:
+                    row = fut.result()
+                    if row:
+                        results.append(row)
+                except Exception as exc:  # noqa: BLE001
+                    logging.exception("FHKQ 计算 %s 失败: %s", futs[fut][0], exc)
+        inner_progress.close()
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM model_fhkq WHERE trade_date = :d"), {"d": trade_date})
+        if results:
+            upsert_rows(
+                engine,
+                "model_fhkq",
+                [
+                    "trade_date",
+                    "stock_code",
+                    "stock_name",
+                    "consecutive_limit_down",
+                    "last_limit_down",
+                    "volume_ratio",
+                    "amount_ratio",
+                    "open_board_flag",
+                    "liquidity_exhaust",
+                    "fhkq_score",
+                    "fhkq_level",
+                ],
+                results,
+                ["trade_date", "stock_code"],
+            )
+        logging.info("FHKQ %s -> %d 条信号", trade_date, len(results))
+        outer_progress.update(1)
+    outer_progress.close()
+    logging.info("FHKQ 完成：%d 个交易日", len(trade_dates))
     return 0
 
 

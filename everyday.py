@@ -1,16 +1,15 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 everyday.py
 
-Cross-platform daily runner:
-- (Optional) update daily OHLCV + indicators/levels + scores into MySQL
-- materialize per-day model outputs into MySQL (LAOWANG/FHKQ)
-- export bingwu daily CSV to outputs/
+单文件“每日流程”脚本：自动执行
+1) getData.py：补齐 K 线
+2) laowang.py：更新评分
+3) fhkq.py：更新连板模型
 
-This is designed to be scheduled (cron / Task Scheduler) after close (15:05).
-
-Run:
-  python everyday.py --config config.ini
+- 自动根据 stock_daily 中的最新日期决定 start-date
+- 用于 CLI 手动运行，也用于 ui.py 的后台计划任务
 """
 
 from __future__ import annotations
@@ -27,133 +26,199 @@ from pathlib import Path
 from typing import List, Optional
 
 from sqlalchemy import text
+from sqlalchemy.engine import Engine, create_engine
 
-from a_stock_analyzer import base_ops
-from a_stock_analyzer import db as adb
-from a_stock_analyzer.runtime import add_db_args, normalize_trade_date, resolve_db_from_args, setup_logging, yyyymmdd_from_date
-
-from bingwu_report import main as bingwu_report_main
-from modeling.registry import build_models
-from modeling.runner import ensure_tables, update_models
+import fhkq as fhkq_mod
+import getData as getdata_mod
+import laowang as laowang_mod
 
 
-def _today_yyyymmdd() -> str:
-    return dt.date.today().strftime("%Y%m%d")
+def _normalize_yyyymmdd(date_str: str) -> str:
+    s = str(date_str or "").strip()
+    if not s:
+        raise ValueError("date required")
+    if len(s) == 8 and s.isdigit():
+        return s
+    return dt.datetime.strptime(s, "%Y-%m-%d").strftime("%Y%m%d")
 
 
-def _date_from_yyyymmdd(s: str) -> dt.date:
-    s = str(s or "").strip()
-    if not (s.isdigit() and len(s) == 8):
-        raise ValueError("Expect YYYYMMDD")
-    return dt.date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+def _yyyymmdd_to_iso(s: str) -> str:
+    if "-" in s:
+        return s
+    if len(s) != 8 or not s.isdigit():
+        raise ValueError(f"Invalid date: {s}")
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def _max_date(engine, table: str, col: str) -> Optional[str]:  # noqa: ANN001
+def _ensure_sqlalchemy_url(db_target: str) -> str:
+    tgt = str(db_target or "").strip()
+    if "://" in tgt:
+        return tgt
+    path = Path(tgt).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{path.as_posix()}"
+
+
+def _make_engine(db_target: str) -> Engine:
+    url = _ensure_sqlalchemy_url(db_target)
+    connect_args = {}
+    if url.startswith("sqlite:///"):
+        connect_args["check_same_thread"] = False
+    engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600, connect_args=connect_args)
+    if engine.dialect.name == "sqlite":
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _):  # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys = ON")
+            cur.execute("PRAGMA journal_mode = WAL")
+            cur.close()
+    return engine
+
+
+def _max_stock_daily(engine: Engine) -> Optional[str]:
     with engine.connect() as conn:
-        row = conn.execute(text(f"SELECT MAX({col}) FROM {table}")).fetchone()
-    if not row:
+        row = conn.execute(text("SELECT MAX(date) FROM stock_daily")).fetchone()
+    if not row or not row[0]:
         return None
-    return str(row[0]) if row[0] else None
+    return str(row[0])
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Daily pipeline + models + bingwu report (MySQL only)")
-    p.add_argument("--log-level", default="INFO")
-    add_db_args(p)
+def _build_common_cli(args: argparse.Namespace) -> List[str]:
+    cli: List[str] = []
+    if getattr(args, "config", None):
+        cli.extend(["--config", str(args.config)])
+    if getattr(args, "db_url", None):
+        cli.extend(["--db-url", str(args.db_url)])
+    elif getattr(args, "db", None):
+        cli.extend(["--db", str(args.db)])
+    return cli
 
-    p.add_argument("--end-date", default=None, help="YYYYMMDD (default: today)")
-    p.add_argument("--workers", type=int, default=16, help="Workers for pipeline (MySQL recommended)")
-    p.add_argument("--models-workers", type=int, default=16, help="Workers for model compute")
-    p.add_argument("--laowang-top", type=int, default=200)
-    p.add_argument("--laowang-min-score", type=float, default=0.0)
 
-    p.add_argument("--skip-pipeline", action="store_true", help="Skip market data update/scoring (not recommended)")
-    p.add_argument("--skip-bingwu", action="store_true", help="Skip bingwu CSV export")
-    return p
+def _run_pipeline(args: argparse.Namespace, *, setup_logging: bool) -> None:
+    if setup_logging:
+        logging.basicConfig(
+            level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
+
+    db_target = getdata_mod.resolve_db_target(args)
+    engine = _make_engine(db_target)
+
+    prev_latest_iso = _max_stock_daily(engine)
+    today_yyyymmdd = dt.date.today().strftime("%Y%m%d")
+
+    if prev_latest_iso:
+        prev_date = dt.datetime.strptime(prev_latest_iso, "%Y-%m-%d").date()
+        fetch_start = (prev_date + dt.timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        fetch_start = _normalize_yyyymmdd(args.initial_start_date)
+
+    need_fetch = fetch_start <= today_yyyymmdd
+    base_cli = _build_common_cli(args)
+
+    if need_fetch:
+        get_cli = base_cli + [
+            "--start-date",
+            fetch_start,
+            "--end-date",
+            today_yyyymmdd,
+            "--workers",
+            str(args.getdata_workers),
+        ]
+        logging.info("[everyday] getData: %s -> %s", fetch_start, today_yyyymmdd)
+        getdata_mod.main(get_cli)
+    else:
+        logging.info("[everyday] getData: K 线已最新，跳过")
+
+    latest_iso = _max_stock_daily(engine)
+    if not latest_iso:
+        logging.warning("[everyday] 数据库仍没有 K 线，终止")
+        return
+
+    if need_fetch:
+        score_start_yyyymmdd = fetch_start
+    else:
+        if prev_latest_iso:
+            score_start_yyyymmdd = prev_latest_iso.replace("-", "")
+        else:
+            score_start_yyyymmdd = today_yyyymmdd
+
+    score_start_iso = _yyyymmdd_to_iso(score_start_yyyymmdd)
+    score_end_iso = latest_iso
+
+    lw_cli = base_cli + [
+        "--start-date",
+        score_start_iso,
+        "--end-date",
+        score_end_iso,
+        "--workers",
+        str(args.laowang_workers),
+        "--top",
+        str(args.laowang_top),
+        "--min-score",
+        str(args.laowang_min_score),
+    ]
+    logging.info("[everyday] laowang: %s -> %s", score_start_iso, score_end_iso)
+    laowang_mod.main(lw_cli)
+
+    fk_cli = base_cli + [
+        "--start-date",
+        score_start_iso,
+        "--end-date",
+        score_end_iso,
+        "--workers",
+        str(args.fhkq_workers),
+    ]
+    logging.info("[everyday] fhkq: %s -> %s", score_start_iso, score_end_iso)
+    fhkq_mod.main(fk_cli)
+
+    logging.info("[everyday] 完成：latest=%s", score_end_iso)
+
+
+def run_once(
+    *,
+    config: Optional[str],
+    db_url: Optional[str],
+    db: Optional[str],
+    initial_start_date: str,
+    getdata_workers: int,
+    laowang_workers: int,
+    fhkq_workers: int,
+    laowang_top: int,
+    laowang_min_score: float,
+) -> None:
+    args = argparse.Namespace(
+        config=config,
+        db_url=db_url,
+        db=db,
+        initial_start_date=initial_start_date,
+        getdata_workers=int(getdata_workers),
+        laowang_workers=int(laowang_workers),
+        fhkq_workers=int(fhkq_workers),
+        laowang_top=int(laowang_top),
+        laowang_min_score=float(laowang_min_score),
+        log_level=logging.getLevelName(logging.getLogger().level),
+    )
+    _run_pipeline(args, setup_logging=False)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    setup_logging(args.log_level)
+    parser = argparse.ArgumentParser(description="每日自动流程（getData → laowang → fhkq）")
+    parser.add_argument("--config", default=None, help="config.ini 路径")
+    parser.add_argument("--db-url", default=None, help="SQLAlchemy DB URL")
+    parser.add_argument("--db", default=None, help="SQLite 文件")
+    parser.add_argument("--initial-start-date", default="2000-01-01", help="数据库为空时的起始日期")
+    parser.add_argument("--getdata-workers", type=int, default=16)
+    parser.add_argument("--laowang-workers", type=int, default=16)
+    parser.add_argument("--fhkq-workers", type=int, default=8)
+    parser.add_argument("--laowang-top", type=int, default=200)
+    parser.add_argument("--laowang-min-score", type=float, default=60.0)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args(argv)
 
-    db_target = resolve_db_from_args(args)
-    mw = max(1, int(args.models_workers))
-    pool_size = max(10, min(64, mw * 2))
-    max_overflow = max(20, min(128, mw * 2))
-    engine = adb.make_engine(db_target, pool_size=pool_size, max_overflow=max_overflow)
-    if engine.dialect.name != "mysql":
-        raise SystemExit("everyday.py requires MySQL (check config.ini / ASTOCK_DB_URL).")
-
-    # Ensure schema (idempotent)
-    base_ops.init_db(db_target)
-    models = build_models(
-        only="both",
-        workers=int(args.models_workers),
-        laowang_top=int(args.laowang_top),
-        laowang_min_score=float(args.laowang_min_score),
-    )
-    ensure_tables(engine, models)
-
-    end_yyyymmdd = str(args.end_date).strip() if args.end_date else _today_yyyymmdd()
-    end_date = _date_from_yyyymmdd(end_yyyymmdd)
-
-    # Decide whether pipeline is needed (avoid slow network calls if already up-to-date).
-    latest_daily = _max_date(engine, "stock_daily", "date")
-    latest_score = _max_date(engine, "stock_scores_v3", "score_date")
-
-    need_pipeline = True
-    if args.skip_pipeline:
-        need_pipeline = False
-    else:
-        if latest_daily:
-            try:
-                latest_daily_date = dt.datetime.strptime(str(latest_daily), "%Y-%m-%d").date()
-                if latest_daily_date >= end_date and latest_score and str(latest_score) >= str(latest_daily):
-                    need_pipeline = False
-            except Exception:
-                need_pipeline = True
-
-    if need_pipeline:
-        logging.info("Pipeline update: end=%s workers=%d", end_yyyymmdd, int(args.workers))
-        # For stocks that have never been pulled before, fetching "all history"
-        # (e.g. from 20000101) is extremely slow. We only need a rolling window
-        # to compute indicators/levels/scores reliably.
-        start_yyyymmdd = (end_date - dt.timedelta(days=1500)).strftime("%Y%m%d")
-        if start_yyyymmdd < "20000101":
-            start_yyyymmdd = "20000101"
-        base_ops.update_daily_and_score_v3(
-            db_target=db_target,
-            start_date=start_yyyymmdd,
-            end_date=end_yyyymmdd,
-            workers=int(args.workers),
-        )
-    else:
-        logging.info("Pipeline already up-to-date; skip.")
-
-    # Resolve effective trade date from DB (latest available trading day).
-    latest_daily2 = _max_date(engine, "stock_daily", "date")
-    if not latest_daily2:
-        raise SystemExit("No stock_daily data found after pipeline; cannot proceed.")
-
-    trade_date_norm = normalize_trade_date(str(latest_daily2))
-    trade_yyyymmdd = yyyymmdd_from_date(trade_date_norm)
-    logging.info("Effective trade date: %s", trade_yyyymmdd)
-
-    # Materialize models (smart incremental based on model_runs)
-    logging.info("Materialize models into MySQL...")
-    update_models(engine=engine, models=models, workers=int(args.models_workers))
-
-    # Export bingwu daily CSV
-    if not args.skip_bingwu:
-        out_dir = Path("outputs")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_csv = out_dir / f"bingwu_{trade_yyyymmdd}.csv"
-        logging.info("Export bingwu CSV: %s", out_csv)
-        # Call bingwu_report.py main directly to avoid subprocess.
-        # Pass --db-url explicitly to avoid accidental SQLite fallback.
-        bingwu_report_main(["--db-url", str(db_target), "--trade-date", trade_yyyymmdd, "--output", str(out_csv)])
-
-    logging.info("Everyday OK.")
+    _run_pipeline(args, setup_logging=True)
     return 0
 
 

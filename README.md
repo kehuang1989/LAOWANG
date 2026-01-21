@@ -1,74 +1,84 @@
-# LAOWANG / FHKQ / BINGWU —— A 股日线分析工具集
+# LAOWANG / FHKQ —— A 股日线分析工具集（极简版）
 
-本仓库提供 3 个日常模型脚本（LAOWANG/FHKQ 按日物化到 MySQL；bingwu 输出 CSV），以及一套公共数据管线模块 `a_stock_analyzer/`。
+本仓库重新收敛为 5 个单文件脚本，职责清晰：
 
-## 模块说明
-- `astock_analyzer.py`：公共数据管线入口（抓取日线 → 入库 → 指标/结构 → 评分）
-- `laowang.py`：LAOWANG v3 评分池导出（右侧中线低位主升浪）
-- `fhkq.py`：FHKQ 连续跌停开板/反抽博弈评分
-- `bingwu.py`：bingwu 超短复盘 & 次日作战（复盘 + 候选股 + 次日计划）
-- `bingwu_report.py`：把 `bingwu.py` 的分析结果导出为每日 CSV（用于统一输出口径）
-
-## 约束（当前项目约定）
-- 统一使用本地 **MySQL**（配置见 `config.ini`）
-- 模型输出写入 MySQL（`model_*` 表），UI 直接读取（不依赖 CSV）
-- 每日报告输出到 `outputs/`：`outputs/bingwu_YYYYMMDD.csv`
-- 不需要的旧文件/旧产物移动到 `recycle_bin/`（不删除）
+| 脚本 | 作用 |
+| --- | --- |
+| `init.py` | 初始化数据库（自动建库 + 表结构） |
+| `getData.py` | 通过 AkShare 拉取 A 股 K 线并写入 DB，支持日期范围 + 多线程 + 进度条 |
+| `laowang.py` | 基于 K 线数据计算 LAOWANG v3 评分，写入 `stock_scores_v3` / `model_laowang_pool` |
+| `fhkq.py` | 计算 FHKQ 连板开板信号，写入 `model_fhkq` |
+| `everyday.py` | “每日流程”脚本：按需运行 getData → laowang → fhkq |
+| `ui.py` | 只读 Web UI，直接从数据库展示模型结果（含 status_tags 徽章，内置 15:05 自动任务） |
 
 ## 快速开始
-1) 配置 MySQL：编辑 `config.ini`（推荐写 `db_url`）
-2) 初始化表结构：
-   - `python init.py --config config.ini`
-   - （自动执行 `CREATE DATABASE IF NOT EXISTS`，无需手动跑 SQL）
-3) 首次跑数（可能较慢）：
-   - `python astock_analyzer.py --config config.ini run --start-date 20000101 --end-date YYYYMMDD --workers 16`
-4) 每日收盘后（增量更新 K 线 + 物化模型输出 + 导出 bingwu CSV）：
-   - `python everyday.py --config config.ini`
 
-## 手工运行（可选）
-- LAOWANG：
-  - `python laowang.py --output outputs/laowang_YYYYMMDD.csv --top 200 --min-score 60`
-- FHKQ：
-  - `python fhkq.py --trade-date YYYYMMDD --output outputs/fhkq_YYYYMMDD.csv --workers 16`
-- bingwu：
-  - `python bingwu_report.py --trade-date YYYYMMDD --output outputs/bingwu_YYYYMMDD.csv`
+1. **准备 Python 环境**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **配置数据库**
+   - 编辑 `config.ini`（推荐写 `db_url` 或 `[mysql]`）
+   - 也支持 CLI `--db-url` / `--db` / 环境变量 `ASTOCK_DB_URL`
+3. **初始化表结构**
+   ```bash
+   python init.py --config config.ini
+   ```
+4. **拉取 K 线数据**
+   ```bash
+   python getData.py --config config.ini --start-date 20200101 --end-date 20240531 --workers 32
+   ```
+5. **计算模型**
+   ```bash
+   python laowang.py --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 32 --top 200
+   python fhkq.py    --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 16
+   ```
+6. **查看 UI（含自动任务）**
+   ```bash
+   python ui.py --config config.ini --start-date 20240101
+   # 浏览 http://127.0.0.1:8000
+   ```
+   > UI 默认会在每日 15:05 启动后台线程，自动运行 `everyday.py`。
 
-## 模型物化 CLI（LAOWANG/FHKQ → MySQL）
-- 增量补齐（自动识别缺少的交易日）：
-  - `python models_update.py --config config.ini --only both --workers 64 update`
-- 指定时间段（同样多线程、带 tqdm 进度条）：
-  - `python models_update.py --config config.ini --only both --workers 64 update --start-date 20240101 --end-date 20240331`
-- 全量/回溯重算（可选限定时间段；覆盖写入 `model_*`）：
-  - `python models_update.py --config config.ini --only both --workers 96 full`
-  - `python models_update.py --config config.ini --only both --workers 96 full --start-date 20220101 --end-date 20220131`
+7. **（可选）手动运行每日流程**
+   ```bash
+   python everyday.py --config config.ini --initial-start-date 2020-01-01
+   ```
 
-## 本地 Web UI（可选）
-- 启动：`python ui.py --config config.ini`
-- 功能：
-  - 选择交易日查看 LAOWANG / FHKQ 表格（来自 MySQL `model_*`）
-  - 若所选交易日已存在 `stock_daily` 但未计算 `model_*`，UI 会自动补算并显示运行状态
-  - LAOWANG 表新增 `status_tags` 徽章列，直接展示评分标签
-  - 15:05 收盘后的“增量更新”建议用任务计划/cron 运行 `python everyday.py --config config.ini`
+## 运行说明
 
-## 数据库与排错
-DB 解析优先级（高 → 低）：
-1. CLI `--db-url`
-2. 环境变量 `ASTOCK_DB_URL`
-3. CLI `--db`（SQLite 文件路径）
-4. `config.ini`
-5. 默认 SQLite：`data/stock.db`（不推荐）
+- 所有脚本默认读取 `config.ini`，也可直接传入 `--db-url` 或 `--db`。
+- `getData.py`/`laowang.py`/`fhkq.py` 均支持 `--start-date` / `--end-date`，格式 `YYYYMMDD` 或 `YYYY-MM-DD`。
+- 进度条基于 `tqdm`，并发单位为“股票”（LAOWANG）或“交易日/候选股”（FHKQ）。
+- UI 只读展示，如需补齐数据可运行 `everyday.py`（UI 也会在 15:05 自动调度）。
+- `ui.py` 支持 `--start-date`，用于限制交易日下拉框只列出最近区间。
 
-工具与物料：
-- `scripts/db_doctor.ps1`：诊断当前最终连到哪个 DB、是否存在核心表
-- `scripts/models_update_incremental.ps1` / `.bat`：只物化模型输出（智能增量）
-- `scripts/models_update_full.ps1` / `.bat`：全量重算（慢）
-- `sql/schema_mysql.sql`：MySQL 建库建表 SQL
-- `sql/README.md`：库/表说明
+## 数据表（MySQL/SQLite 通用）
 
-## 文档
-- `docs/sop.md`：每日运行 SOP
-- `docs/db_init.md`：数据库初始化与排错
-- `docs/scoring_laowang.md` / `docs/scoring_fhkq.md` / `docs/scoring_bingwu.md`：评分标准
+| 表名 | 说明 |
+| --- | --- |
+| `stock_info` | 股票基础信息（`getData.py` 写入） |
+| `stock_daily` | 日线 OHLCV 数据 |
+| `stock_scores_v3` | LAOWANG 单股评分（`laowang.py` 写入） |
+| `stock_levels` | 支撑/阻力明细（`laowang.py`） |
+| `model_laowang_pool` | 每日 LAOWANG TopN（UI 读取） |
+| `model_fhkq` | 每日 FHKQ 信号（UI 读取） |
 
-## 免责声明
-仅供学习研究，不构成投资建议；风险自担。
+## recycle_bin
+
+历史版本的多模块实现（`a_stock_analyzer/`、`modeling/`、bingwu 系列等）已全部迁入 `recycle_bin/`，如需参考旧代码可在那里查找。
+
+## 自动任务说明
+
+- `everyday.py` 会自动判断 `stock_daily` 的最新交易日，补齐到当日，然后重算 LAOWANG/FHKQ。
+- `ui.py` 启动时默认开启后台线程，每天 15:05 触发 `everyday.py`（可通过 `--disable-auto-update` 关闭；时间用 `--auto-time HH:MM` 指定）。
+- 相关并发参数：
+  - `--auto-getdata-workers`
+  - `--auto-laowang-workers`
+  - `--auto-fhkq-workers`
+  - `--auto-laowang-top` / `--auto-laowang-min-score`
+  - `--auto-init-start-date`（数据库为空时的起始日）
+
+## 注意
+
+- 本项目仅供学习交流，不构成投资建议；据此操作风险自担。

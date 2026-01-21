@@ -1,96 +1,51 @@
-# DB 初始化与排错（MySQL）
+# 数据库初始化与排错
 
-本项目默认只推荐使用本地 MySQL（配置见 `config.ini`），核心表结构在 `sql/schema_mysql.sql`。
+## 1. 连接方式
 
-## 1) 启动 MySQL（两种方式）
+- 推荐：在 `config.ini` 中写 `db_url = mysql+pymysql://user:pass@127.0.0.1:3306/astock?charset=utf8mb4`
+- 也可填写 `[mysql]` 段，脚本会自动拼接。
+- 连接优先级：`--db-url` > `ASTOCK_DB_URL` > `--db` > `config.ini` > `data/stock.db`
 
-### 方式 A：Docker（仓库提供 compose）
-
-前提：已安装 Docker Desktop + `docker compose`。
-
-```bash
-docker compose -f docker-compose.mysql.yml up -d
-```
-
-注意：`docker-compose.mysql.yml` 内置了示例账号/库名（如 `astock/astock_pass` / `astock`）。
-请同步修改 `config.ini` 里的 `db_url` 或 `[mysql]` 配置。
-
-### 方式 B：本机安装 MySQL
-
-确保你已经创建好数据库（如 `astock`）并准备好账号权限：
-
-```sql
-CREATE DATABASE astock DEFAULT CHARSET utf8mb4;
-GRANT ALL PRIVILEGES ON astock.* TO 'astock'@'%' IDENTIFIED BY '你的密码';
-FLUSH PRIVILEGES;
-```
-
-## 2) 配置 `config.ini`
-
-推荐直接写：
-
-- `[database] db_url = mysql+pymysql://user:password@127.0.0.1:3306/astock?charset=utf8mb4`
-
-也可以填 `[mysql]` 段让程序自动拼接。
-
-连接优先级（高 → 低）：
-
-1. CLI `--db-url`
-2. 环境变量 `ASTOCK_DB_URL`
-3. CLI `--db`（SQLite 文件路径）
-4. `config.ini`
-5. 默认 SQLite：`data/stock.db`（不推荐）
-
-## 3) 初始化表结构（只需一次）
-
-推荐（脚本方式；账号具备建库权限即可）：
+## 2. 初始化步骤
 
 ```bash
 python init.py --config config.ini
 ```
 
-> 提示：`init.py` / `astock_analyzer.py init-db` 会自动执行 `CREATE DATABASE IF NOT EXISTS`，
-> 因此只要账号有建库权限即可“一键初始化”，无需手动导入 SQL。
+- 若连接的是 MySQL，会自动 `CREATE DATABASE IF NOT EXISTS`。
+- 创建表：`stock_info`、`stock_daily`、`stock_levels`、`stock_scores_v3`、`model_laowang_pool`、`model_fhkq`。
 
-等价命令：
+## 3. 核心脚本与表对应关系
 
-```bash
-python astock_analyzer.py --config config.ini init-db
-python models_update.py --config config.ini init-tables
+| 脚本 | 依赖表 | 写入表 |
+| --- | --- | --- |
+| `getData.py` | `stock_info`*、`stock_daily`* | `stock_info`、`stock_daily` |
+| `laowang.py` | `stock_info`、`stock_daily` | `stock_scores_v3`、`stock_levels`、`model_laowang_pool` |
+| `fhkq.py` | `stock_info`、`stock_daily` | `model_fhkq` |
+| `ui.py` | `model_laowang_pool`、`model_fhkq` | —— |
+
+（带 * 的表会在不存在时创建）
+
+## 4. 常见排错 SQL
+
+```sql
+-- 确认日线覆盖
+SELECT COUNT(*) FROM stock_daily WHERE date='2024-05-31';
+
+-- 查看 LAOWANG 评分是否写入
+SELECT COUNT(*) FROM stock_scores_v3 WHERE score_date='2024-05-31';
+
+-- 查看 UI 数据源
+SELECT COUNT(*) FROM model_laowang_pool WHERE trade_date='2024-05-31';
+SELECT COUNT(*) FROM model_fhkq WHERE trade_date='2024-05-31';
 ```
 
-如果你希望用纯 SQL 一次性建库建表（例如没有建库权限）：
+## 5. SQLite 提示
 
-```bash
-mysql -u astock -p -h 127.0.0.1 -P 3306 < sql/schema_mysql.sql
-```
+- 若使用 `--db data/stock.db`，脚本会自动创建目录并启用 WAL 模式（并发读更快）。
+- 单机轻量使用可快速上手；后续迁移至 MySQL 只需改配置并重新 `init.py`。
 
-（该 SQL 文件会创建数据库 `astock`；如需别的库名请自行改 `schema_mysql.sql` 的 `CREATE DATABASE/USE`）
+## 6. 其他
 
-## 4) 一键诊断（推荐）
-
-```powershell
-scripts/db_doctor.ps1
-```
-
-它会输出：
-- 实际解析到的 DB（会对密码打码）
-- 方言（mysql/sqlite）
-- 当前库里的表数量
-- 核心表是否齐全（`stock_daily` / `stock_scores_v3` / `model_*` 等）
-
-## 5) 常见问题
-
-### 5.1 明明配了 MySQL，却跑到 SQLite
-
-99% 是被 `ASTOCK_DB_URL` 或 CLI `--db data/stock.db` 覆盖了。
-建议：
-- 日常不要长期设置 `ASTOCK_DB_URL`
-- 只用 `config.ini` 管理连接
-
-### 5.2 `no such table: stock_daily`
-
-含义：连到了空库（MySQL 选错库 / 没初始化 / 或误连 SQLite 文件）。
-处理：
-1) `scripts/db_doctor.ps1` 看最终连到哪里、核心表是否存在  
-2) 再跑 `python init.py --config config.ini` 或 `python astock_analyzer.py --config config.ini init-db`
+- 旧版的 `a_stock_analyzer/`、`modeling/` 等仍在 `recycle_bin/`，但与新架构无关。
+- 若需要自定义表结构，可在运行 `init.py` 前修改脚本中的 DDL 语句。
