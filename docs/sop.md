@@ -58,7 +58,7 @@ python fhkq.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-21
 ## 6. 查看结果 + 自动任务
 
 ```bash
-python ui.py --config config.ini --start-date 20240101
+python ui.py --config config.ini --start-date 20260101 --host 0.0.0.0 --port 80
 # 浏览 http://127.0.0.1:8000
 ```
 
