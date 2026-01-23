@@ -7,9 +7,10 @@
 | `init.py` | 初始化数据库（自动建库 + 表结构） |
 | `getData.py` | 通过 AkShare 拉取 A 股 K 线并写入 DB，支持日期范围 + 多线程 + 进度条 |
 | `scoring_laowang.py` | 基于 K 线数据计算 LAOWANG v3 评分，写入 `stock_scores_v3` / `model_laowang_pool` |
-| `scoring_stwg.py` | 依据 docs/scoring_stwg.md 的缩头乌龟模型，写入 `stock_scores_stwg` / `model_stwg_pool` |
+| `scoring_ywcx.py` | 阳痿次新模型（docs/scoring_ywcx.md），写入 `stock_scores_ywcx` / `model_ywcx_pool` |
+| `scoring_stwg.py` | 缩头乌龟模型，写入 `stock_scores_stwg` / `model_stwg_pool` |
 | `scoring_fhkq.py` | 计算 FHKQ 连板开板信号，写入 `model_fhkq` |
-| `everyday.py` | “每日流程”脚本：按需运行 getData → scoring_laowang → scoring_stwg → scoring_fhkq |
+| `everyday.py` | “每日流程”脚本：按需运行 getData → scoring_laowang → scoring_ywcx → scoring_stwg → scoring_fhkq |
 | `ui.py` | 只读 Web UI，直接从数据库展示模型结果（含 status_tags 徽章，内置 15:05 自动任务） |
 
 ## 快速开始
@@ -32,6 +33,7 @@
 5. **计算模型**
    ```bash
    python scoring_laowang.py --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 32 --top 200
+   python scoring_ywcx.py    --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 16 --top 120
    python scoring_stwg.py    --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 16 --top 150
    python scoring_fhkq.py    --config config.ini --start-date 2024-01-01 --end-date 2024-05-31 --workers 16
    ```
@@ -50,7 +52,7 @@
 ## 运行说明
 
 - 所有脚本默认读取 `config.ini`，也可直接传入 `--db-url` 或 `--db`。
-- `getData.py`/`scoring_laowang.py`/`scoring_stwg.py`/`scoring_fhkq.py` 均支持 `--start-date` / `--end-date`，格式 `YYYYMMDD` 或 `YYYY-MM-DD`。
+- `getData.py`/`scoring_laowang.py`/`scoring_ywcx.py`/`scoring_stwg.py`/`scoring_fhkq.py` 均支持 `--start-date` / `--end-date`，格式 `YYYYMMDD` 或 `YYYY-MM-DD`。
 - 进度条基于 `tqdm`，并发单位为“股票”（LAOWANG）或“交易日/候选股”（FHKQ）。
 - UI 只读展示，如需补齐数据可运行 `everyday.py`（UI 也会在 15:05 自动调度）。
 - `ui.py` 支持 `--start-date`，用于限制交易日下拉框只列出最近区间。
@@ -59,12 +61,14 @@
 
 | 表名 | 说明 |
 | --- | --- |
-| `stock_info` | 股票基础信息（`getData.py` 写入） |
+| `stock_info` | 股票基础信息 + 流通市值（`getData.py` 写入，列：`float_cap_billion` 为亿元） |
 | `stock_daily` | 日线 OHLCV 数据 |
 | `stock_scores_v3` | LAOWANG 单股评分（`scoring_laowang.py` 写入） |
 | `stock_levels` | 支撑/阻力明细（`scoring_laowang.py`） |
+| `stock_scores_ywcx` | YWCX 单股评分（`scoring_ywcx.py` 写入） |
 | `stock_scores_stwg` | STWG 单股评分（`scoring_stwg.py` 写入） |
 | `model_laowang_pool` | 每日 LAOWANG TopN（UI 读取） |
+| `model_ywcx_pool` | 每日 YWCX TopN（UI 读取） |
 | `model_stwg_pool` | 每日 STWG TopN（UI 读取） |
 | `model_fhkq` | 每日 FHKQ 信号（UI 读取） |
 
@@ -74,12 +78,13 @@
 
 ## 自动任务说明
 
-- `everyday.py` 会自动判断 `stock_daily` 的最新交易日，补齐到当日，然后重算 LAOWANG / STWG / FHKQ。
+- `everyday.py` 会自动判断 `stock_daily` 的最新交易日，补齐到当日，然后重算 LAOWANG / YWCX / STWG / FHKQ。
 - `ui.py` 启动时默认开启后台线程，每天 15:05 触发 `everyday.py`（可通过 `--disable-auto-update` 关闭；时间用 `--auto-time HH:MM` 指定）。
 - 相关并发参数：
   - `--auto-getdata-workers`
-  - `--auto-laowang-workers` / `--auto-stwg-workers` / `--auto-fhkq-workers`
+  - `--auto-laowang-workers` / `--auto-ywcx-workers` / `--auto-stwg-workers` / `--auto-fhkq-workers`
   - `--auto-laowang-top` / `--auto-laowang-min-score`
+  - `--auto-ywcx-top` / `--auto-ywcx-min-score`
   - `--auto-stwg-top` / `--auto-stwg-min-score`
   - `--auto-init-start-date`（数据库为空时的起始日）
 

@@ -6,7 +6,7 @@ init.py
 项目首次部署用的唯一入口：
 - 自动解析 config.ini / 环境变量 / CLI DB 参数
 - 如为 MySQL，会先 CREATE DATABASE IF NOT EXISTS
-- 创建所需表：stock_info / stock_daily / stock_scores_v3 / stock_levels / model_laowang_pool / model_fhkq / stock_scores_stwg / model_stwg_pool
+- 创建所需表：stock_info / stock_daily / stock_scores_v3 / stock_levels / model_laowang_pool / model_fhkq / stock_scores_stwg / model_stwg_pool / stock_scores_ywcx / model_ywcx_pool
 """
 
 from __future__ import annotations
@@ -152,7 +152,8 @@ DDL_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS stock_info (
         stock_code VARCHAR(16) PRIMARY KEY,
-        name VARCHAR(255)
+        name VARCHAR(255),
+        float_cap_billion DOUBLE NULL
     )
     """,
     """
@@ -241,6 +242,36 @@ DDL_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS stock_scores_ywcx (
+        stock_code VARCHAR(16) NOT NULL,
+        score_date VARCHAR(10) NOT NULL,
+        total_score DOUBLE NULL,
+        weak_position_score DOUBLE NULL,
+        volume_dry_score DOUBLE NULL,
+        low_volatility_score DOUBLE NULL,
+        micro_trend_score DOUBLE NULL,
+        float_cap_score DOUBLE NULL,
+        attention_score DOUBLE NULL,
+        status_tags TEXT NULL,
+        PRIMARY KEY (stock_code, score_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS model_ywcx_pool (
+        trade_date VARCHAR(10) NOT NULL,
+        rank_no INT NULL,
+        stock_code VARCHAR(16) NOT NULL,
+        stock_name VARCHAR(255) NULL,
+        close DOUBLE NULL,
+        total_score DOUBLE NULL,
+        weak_position_score DOUBLE NULL,
+        volume_dry_score DOUBLE NULL,
+        low_volatility_score DOUBLE NULL,
+        status_tags TEXT NULL,
+        PRIMARY KEY (trade_date, stock_code)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS model_fhkq (
         trade_date VARCHAR(10) NOT NULL,
         stock_code VARCHAR(16) NOT NULL,
@@ -259,17 +290,6 @@ DDL_STATEMENTS = [
 ]
 
 
-def _is_table_exists_error(exc: SQLAlchemyError) -> bool:
-    msg = ""
-    orig = getattr(exc, "orig", exc)
-    if hasattr(orig, "args") and orig.args:
-        msg = " ".join(str(a) for a in orig.args if a)
-    if not msg:
-        msg = str(exc)
-    msg = msg.lower()
-    return "already exists" in msg or "exists" in msg and "table" in msg
-
-
 def run_init(engine: Engine) -> None:
     with engine.begin() as conn:
         for idx, stmt in enumerate(DDL_STATEMENTS, start=1):
@@ -281,7 +301,34 @@ def run_init(engine: Engine) -> None:
                     continue
                 logging.error("DDL #%d 执行失败，需要处理：%s", idx, exc)
                 raise
+    _ensure_stock_info_float_cap(engine)
     logging.info("数据库表创建完成（如已存在则跳过）")
+
+
+def _is_table_exists_error(exc: SQLAlchemyError) -> bool:
+    msg = ""
+    orig = getattr(exc, "orig", exc)
+    if hasattr(orig, "args") and orig.args:
+        msg = " ".join(str(a) for a in orig.args if a)
+    if not msg:
+        msg = str(exc)
+    msg = msg.lower()
+    return "already exists" in msg or "exists" in msg and "table" in msg
+
+
+def _ensure_stock_info_float_cap(engine: Engine) -> None:
+    stmt = "ALTER TABLE stock_info ADD COLUMN float_cap_billion DOUBLE NULL"
+    if engine.dialect.name == "sqlite":
+        stmt = "ALTER TABLE stock_info ADD COLUMN float_cap_billion DOUBLE"
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(stmt))
+            logging.info("stock_info 新增 float_cap_billion 列")
+    except SQLAlchemyError as exc:
+        msg = str(getattr(exc, "orig", exc)).lower()
+        if "duplicate" in msg or "exists" in msg:
+            return
+        raise
 
 
 def main(argv: Optional[list[str]] = None) -> int:

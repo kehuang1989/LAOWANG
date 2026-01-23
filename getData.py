@@ -27,6 +27,7 @@ import akshare as ak
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine, create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 
 DEFAULT_DB = "data/stock.db"
@@ -134,7 +135,8 @@ def ensure_core_tables(engine: Engine) -> None:
         """
         CREATE TABLE IF NOT EXISTS stock_info (
             stock_code VARCHAR(16) PRIMARY KEY,
-            name VARCHAR(255)
+            name VARCHAR(255),
+            float_cap_billion DOUBLE NULL
         )
         """,
         """
@@ -154,21 +156,59 @@ def ensure_core_tables(engine: Engine) -> None:
     with engine.begin() as conn:
         for stmt in ddl:
             conn.execute(text(stmt))
+    _ensure_stock_info_float_cap(engine)
 
 
-def fetch_stock_list() -> List[Tuple[str, str]]:
+def _ensure_stock_info_float_cap(engine: Engine) -> None:
+    stmt = "ALTER TABLE stock_info ADD COLUMN float_cap_billion DOUBLE NULL"
+    if engine.dialect.name == "sqlite":
+        stmt = "ALTER TABLE stock_info ADD COLUMN float_cap_billion DOUBLE"
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(stmt))
+            logging.info("[getData] stock_info 新增 float_cap_billion 列")
+    except SQLAlchemyError as exc:
+        msg = str(getattr(exc, "orig", exc)).lower()
+        if "duplicate" in msg or "exists" in msg:
+            return
+        raise
+
+
+def _parse_float_cap(raw: object) -> Optional[float]:
+    if raw in (None, "", "nan", "NaN"):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    import math
+
+    if math.isnan(val) or math.isinf(val) or val <= 0:
+        return None
+    if val > 1e6:
+        val = val / 1e8
+    return round(val, 4)
+
+
+def fetch_stock_list() -> List[Tuple[str, str, Optional[float]]]:
     try:
         df = ak.stock_zh_a_spot_em()
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"AkShare stock list failed: {exc}") from exc
     if df is None or df.empty:
         raise RuntimeError("AkShare returned empty stock list")
-    out: List[Tuple[str, str]] = []
+    out: List[Tuple[str, str, Optional[float]]] = []
     for row in df.itertuples(index=False):
         code = str(getattr(row, "代码"))
         name = str(getattr(row, "名称") or "")
+        cap_val = None
+        for col in ("流通市值", "流通市值-亿", "流通市值亿元"):
+            if hasattr(row, col):
+                cap_val = getattr(row, col)
+                break
+        cap = _parse_float_cap(cap_val)
         if code and code not in {"", "nan"}:
-            out.append((code, name))
+            out.append((code, name, cap))
     return out
 
 
@@ -217,21 +257,25 @@ def get_latest_date(engine: Engine, stock_code: str) -> Optional[str]:
     return str(row[0])
 
 
-def upsert_stock_info(engine: Engine, rows: Iterable[Tuple[str, str]]) -> None:
+def upsert_stock_info(engine: Engine, rows: Iterable[Tuple[str, str, Optional[float]]]) -> None:
     stmt = text(
         """
-        INSERT INTO stock_info(stock_code, name)
-        VALUES(:code, :name)
-        ON CONFLICT(stock_code) DO UPDATE SET name=excluded.name
+        INSERT INTO stock_info(stock_code, name, float_cap_billion)
+        VALUES(:code, :name, :cap)
+        ON CONFLICT(stock_code) DO UPDATE SET
+          name=excluded.name,
+          float_cap_billion=COALESCE(excluded.float_cap_billion, float_cap_billion)
         """
         if engine.dialect.name == "sqlite"
         else """
-        INSERT INTO stock_info(stock_code, name)
-        VALUES(:code, :name)
-        ON DUPLICATE KEY UPDATE name=VALUES(name)
+        INSERT INTO stock_info(stock_code, name, float_cap_billion)
+        VALUES(:code, :name, :cap)
+        ON DUPLICATE KEY UPDATE
+          name=VALUES(name),
+          float_cap_billion=COALESCE(VALUES(float_cap_billion), float_cap_billion)
         """
     )
-    batch = [{"code": code, "name": name} for code, name in rows]
+    batch = [{"code": code, "name": name, "cap": cap} for code, name, cap in rows]
     if not batch:
         return
     with engine.begin() as conn:

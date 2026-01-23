@@ -13,17 +13,18 @@ python init.py --config config.ini
 ```
 
 - 若连接的是 MySQL，会自动 `CREATE DATABASE IF NOT EXISTS`。
-- 创建表：`stock_info`、`stock_daily`、`stock_levels`、`stock_scores_v3`、`stock_scores_stwg`、`model_laowang_pool`、`model_stwg_pool`、`model_fhkq`。
+- 创建表：`stock_info`、`stock_daily`、`stock_levels`、`stock_scores_v3`、`stock_scores_ywcx`、`stock_scores_stwg`、`model_laowang_pool`、`model_ywcx_pool`、`model_stwg_pool`、`model_fhkq`。
 
 ## 3. 核心脚本与表对应关系
 
 | 脚本 | 依赖表 | 写入表 |
 | --- | --- | --- |
-| `getData.py` | `stock_info`*、`stock_daily`* | `stock_info`、`stock_daily` |
+| `getData.py` | `stock_info`*、`stock_daily`* | `stock_info`（含 `float_cap_billion`）、`stock_daily` |
 | `scoring_laowang.py` | `stock_info`、`stock_daily` | `stock_scores_v3`、`stock_levels`、`model_laowang_pool` |
+| `scoring_ywcx.py` | `stock_info`、`stock_daily` | `stock_scores_ywcx`、`model_ywcx_pool` |
 | `scoring_stwg.py` | `stock_info`、`stock_daily` | `stock_scores_stwg`、`model_stwg_pool` |
 | `scoring_fhkq.py` | `stock_info`、`stock_daily` | `model_fhkq` |
-| `ui.py` | `model_laowang_pool`、`model_stwg_pool`、`model_fhkq` | —— |
+| `ui.py` | `model_laowang_pool`、`model_ywcx_pool`、`model_stwg_pool`、`model_fhkq` | —— |
 
 （带 * 的表会在不存在时创建）
 
@@ -38,6 +39,7 @@ SELECT COUNT(*) FROM stock_scores_v3 WHERE score_date='2024-05-31';
 
 -- 查看 UI 数据源
 SELECT COUNT(*) FROM model_laowang_pool WHERE trade_date='2024-05-31';
+SELECT COUNT(*) FROM model_ywcx_pool WHERE trade_date='2024-05-31';
 SELECT COUNT(*) FROM model_stwg_pool WHERE trade_date='2024-05-31';
 SELECT COUNT(*) FROM model_fhkq WHERE trade_date='2024-05-31';
 ```
