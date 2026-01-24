@@ -212,7 +212,7 @@ HTML_PAGE = r"""<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>爆头先锋</title>
+    <title>粪海狂蛆</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon" />
     <style>
       :root {
@@ -403,9 +403,22 @@ HTML_PAGE = r"""<!doctype html>
           <div class="empty" id="emptyFhkq" style="display:none;"></div>
         </div>
       </div>
+      <div class="panel">
+        <div class="panel-header">
+          <div>缩头乌龟 股票池</div>
+          <div id="metaStwg"></div>
+        </div>
+        <div class="table-wrap">
+          <table id="tableStwg">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty" id="emptyStwg" style="display:none;"></div>
+        </div>
+      </div>
       <div class="footer">
         <div id="autoStatus" class="status-line status-busy">等待自动更新…</div>
-        <div>爆头先锋</div>
+        <div>Georgij Xe & his boys</div>
       </div>
     </div>
 
@@ -880,7 +893,9 @@ class DailyJobRunner:
         self.stwg_top = int(stwg_top)
         self.stwg_min_score = float(stwg_min_score)
         self.hour, self.minute = self._parse_time(auto_time)
-        self.last_run_date: Optional[dt.date] = None
+        now = dt.datetime.now()
+        target = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
+        self.last_run_date: Optional[dt.date] = now.date() if now >= target else None
         self.state = "idle"
         self.message = "等待自动更新…"
         self.thread = threading.Thread(target=self._loop, name="DailyJobRunner", daemon=True)
@@ -953,7 +968,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--disable-auto-update", action="store_true", help="禁用 15:05 自动执行 everyday.py")
     parser.add_argument("--auto-time", default="15:05", help="HH:MM（默认 15:05）")
     parser.add_argument("--auto-init-start-date", default="2000-01-01")
-    parser.add_argument("--auto-getdata-workers", type=int, default=16)
+    parser.add_argument("--auto-getdata-workers", type=int, default=1)
     parser.add_argument("--auto-laowang-workers", type=int, default=16)
     parser.add_argument("--auto-ywcx-workers", type=int, default=16)
     parser.add_argument("--auto-stwg-workers", type=int, default=16)

@@ -29,7 +29,7 @@ python init.py --config config.ini
 ## 3. 抓取 K 线
 
 ```bash
-python getData.py --config config.ini --start-date 20250101 --end-date 20260123 --workers 16
+python getDataBaoStock.py --config config.ini --start-date 20250101 --end-date 20260123 --workers 1
 ```
 
 - `start-date/end-date` 支持 `YYYYMMDD` / `YYYY-MM-DD`。
@@ -39,7 +39,7 @@ python getData.py --config config.ini --start-date 20250101 --end-date 20260123 
 ## 4. 计算 LAOWANG
 
 ```bash
-python scoring_laowang.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-21 --workers 32 --top 200 --min-score 60
+python scoring_laowang.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-23 --workers 32 --top 200 --min-score 60
 ```
 
 - 读取 `stock_daily`，对区间内所有交易日逐股计算评分。
@@ -49,7 +49,7 @@ python scoring_laowang.py --config config.ini --start-date 2026-01-01 --end-date
 ## 5. 计算 YWCX
 
 ```bash
-python scoring_ywcx.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-23 --workers 32 --top 120 --min-score 55
+python scoring_ywcx.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-23 --workers 32 --top 120 --min-score 40
 ```
 
 - 根据 docs/scoring_ywcx.md 的阳痿次新模型，逐股计算评分。
@@ -58,7 +58,7 @@ python scoring_ywcx.py --config config.ini --start-date 2026-01-01 --end-date 20
 ## 6. 计算 STWG
 
 ```bash
-python scoring_stwg.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-22 --workers 32 --top 150 --min-score 55
+python scoring_stwg.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-23 --workers 32 --top 150 --min-score 55
 ```
 
 - 根据 docs/scoring_stwg.md 描述的缩头乌龟模型，逐股计算评分。
@@ -67,7 +67,7 @@ python scoring_stwg.py --config config.ini --start-date 2026-01-01 --end-date 20
 ## 7. 计算 FHKQ
 
 ```bash
-python scoring_fhkq.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-21 --workers 16
+python scoring_fhkq.py --config config.ini --start-date 2026-01-01 --end-date 2026-01-23 --workers 16
 ```
 
 - 按交易日遍历，寻找连板跌停候选股。
@@ -76,7 +76,7 @@ python scoring_fhkq.py --config config.ini --start-date 2026-01-01 --end-date 20
 ## 8. 查看结果 + 自动任务
 
 ```bash
-python ui.py --config config.ini --start-date 20260101 --host 0.0.0.0 --port 80
+python ui.py --config config.ini --start-date 20260101 --host 0.0.0.0 --port 80 --disable-auto-update
 # 浏览 http://127.0.0.1:8000
 ```
 

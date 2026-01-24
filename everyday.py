@@ -4,7 +4,7 @@
 everyday.py
 
 单文件“每日流程”脚本：自动执行
-1) getData.py：补齐 K 线
+1) getDataBaoStock.py：补齐 K 线
 2) scoring_laowang.py：更新老王评分
 3) scoring_ywcx.py：更新阳痿次新评分
 4) scoring_stwg.py：更新缩头乌龟评分
@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine, create_engine
 
 import scoring_fhkq as fhkq_mod
-import getData as getdata_mod
+import getDataBaoStock as getdata_mod
 import scoring_laowang as laowang_mod
 import scoring_stwg as stwg_mod
 import scoring_ywcx as ywcx_mod
@@ -122,6 +122,7 @@ def _run_pipeline(args: argparse.Namespace, *, setup_logging: bool) -> None:
     need_fetch = fetch_start <= today_yyyymmdd
     base_cli = _build_common_cli(args)
 
+    get_workers = 1
     if need_fetch:
         get_cli = base_cli + [
             "--start-date",
@@ -129,12 +130,12 @@ def _run_pipeline(args: argparse.Namespace, *, setup_logging: bool) -> None:
             "--end-date",
             today_yyyymmdd,
             "--workers",
-            str(args.getdata_workers),
+            str(get_workers),
         ]
-        logging.info("[everyday] getData: %s -> %s", fetch_start, today_yyyymmdd)
+        logging.info("[everyday] getDataBaoStock: %s -> %s (workers=%s)", fetch_start, today_yyyymmdd, get_workers)
         getdata_mod.main(get_cli)
     else:
-        logging.info("[everyday] getData: K 线已最新，跳过")
+        logging.info("[everyday] getDataBaoStock: K 线已最新，跳过")
 
     latest_iso = _max_stock_daily(engine)
     if not latest_iso:
@@ -251,12 +252,12 @@ def run_once(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="每日自动流程（getData → scoring_laowang → scoring_ywcx → scoring_stwg → scoring_fhkq）")
+    parser = argparse.ArgumentParser(description="每日自动流程（getDataBaoStock → scoring_laowang → scoring_ywcx → scoring_stwg → scoring_fhkq）")
     parser.add_argument("--config", default=None, help="config.ini 路径")
     parser.add_argument("--db-url", default=None, help="SQLAlchemy DB URL")
     parser.add_argument("--db", default=None, help="SQLite 文件")
     parser.add_argument("--initial-start-date", default="2000-01-01", help="数据库为空时的起始日期")
-    parser.add_argument("--getdata-workers", type=int, default=16)
+    parser.add_argument("--getdata-workers", type=int, default=1)
     parser.add_argument("--laowang-workers", type=int, default=16)
     parser.add_argument("--ywcx-workers", type=int, default=16)
     parser.add_argument("--stwg-workers", type=int, default=16)
