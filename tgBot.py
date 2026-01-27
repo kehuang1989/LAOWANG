@@ -37,6 +37,7 @@ from sqlalchemy.engine import Engine, create_engine
 
 DEFAULT_DB = "data/stock.db"
 DEFAULT_BOT_TOKEN = "8322336287:AAHR4RqsL1SwZsYuRfzNL_rbMNUPL87Bd0c"
+DEFAULT_PROXY = "http://127.0.0.1:7890"
 SUBSCRIBERS_PATH = Path("data/tg_subscribers.json")
 
 
@@ -133,6 +134,19 @@ def _default_token(token: Optional[str]) -> Optional[str]:
     if env and env.strip():
         return env.strip()
     return DEFAULT_BOT_TOKEN
+
+
+def _resolve_proxy(value: Optional[str]) -> Optional[str]:
+    candidate: Optional[str]
+    if value is None:
+        env = os.getenv("TG_BOT_PROXY")
+        candidate = env if env is not None else DEFAULT_PROXY
+    else:
+        candidate = value
+    s = str(candidate or "").strip()
+    if not s or s.lower() in {"none", "no", "off"}:
+        return None
+    return s
 
 
 class SubscriberStore:
@@ -354,10 +368,13 @@ def build_summary_text(engine: Engine, keys: Optional[Sequence[str]] = None, *, 
 
 
 class TelegramClient:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, proxy: Optional[str]) -> None:
         self.token = token
         self.base = f"https://api.telegram.org/bot{token}"
         self.session = requests.Session()
+        if proxy:
+            self.session.proxies.update({"http": proxy, "https": proxy})
+            logging.info("[tg] 使用代理：%s", proxy)
 
     def send_message(self, chat_id: int, text: str, *, retry: int = 2) -> None:
         payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
@@ -392,12 +409,13 @@ class BotService:
         *,
         engine: Engine,
         token: str,
+        proxy: Optional[str],
         store: SubscriberStore,
         limit: int,
         poll_timeout: int = 30,
     ) -> None:
         self.engine = engine
-        self.client = TelegramClient(token)
+        self.client = TelegramClient(token, proxy=proxy)
         self.store = store
         self.limit = max(1, min(limit, 20))
         self.poll_timeout = poll_timeout
@@ -459,6 +477,7 @@ def push_latest_pools(
     token: Optional[str],
     store: SubscriberStore,
     limit: int = 15,
+    proxy: Optional[str] = None,
 ) -> None:
     real_token = _default_token(token)
     if not real_token:
@@ -469,7 +488,8 @@ def push_latest_pools(
         logging.info("[tg] 没有订阅者，跳过推送")
         return
     text = build_summary_text(engine, limit=limit)
-    client = TelegramClient(real_token)
+    proxy_url = _resolve_proxy(proxy)
+    client = TelegramClient(real_token, proxy=proxy_url)
     for chat_id in subscribers:
         client.send_message(chat_id=chat_id, text=text)
     logging.info("[tg] 推送完成，覆盖 %d 个订阅者", len(subscribers))
@@ -485,6 +505,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=15, help="每个股票池返回条数")
     parser.add_argument("--mode", choices=["serve", "push"], default="serve", help="serve=长轮询, push=立即推送一次")
     parser.add_argument("--poll-timeout", type=int, default=30, help="getUpdates 超时时间（秒）")
+    parser.add_argument("--proxy", default=DEFAULT_PROXY, help="HTTP/HTTPS 代理，例如 http://127.0.0.1:7890；传空字符串关闭")
     return parser
 
 
@@ -499,13 +520,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not token:
         logging.error("未提供 bot token，可用 --bot-token 或 TG_BOT_TOKEN")
         return 1
+    proxy_url = _resolve_proxy(args.proxy)
     store = SubscriberStore(Path(args.subscriber_file))
 
     if args.mode == "push":
-        push_latest_pools(engine=engine, token=token, store=store, limit=int(args.limit))
+        push_latest_pools(engine=engine, token=token, store=store, limit=int(args.limit), proxy=proxy_url)
         return 0
 
-    srv = BotService(engine=engine, token=token, store=store, limit=int(args.limit), poll_timeout=int(args.poll_timeout))
+    srv = BotService(
+        engine=engine,
+        token=token,
+        proxy=proxy_url,
+        store=store,
+        limit=int(args.limit),
+        poll_timeout=int(args.poll_timeout),
+    )
     srv.run()
     return 0
 

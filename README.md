@@ -76,6 +76,7 @@ python everyday.py --config config.ini --initial-start-date 2020-01-01
 - 订阅者列表：`data/tg_subscribers.json`（与 bot 对话一次即可自动加入）
 - everyday.py 完成后会自动调用 push，将当日四个股票池推送给所有订阅者
 - 消息为纯文本格式（无 Markdown），避免 Telegram 解析失败
+- 代理：`--proxy` 默认为 `http://127.0.0.1:7890`，可设为空字符串 / `none` 关闭，也可用环境变量 `TG_BOT_PROXY`
 
 ## 数据表（MySQL / SQLite 通用）
 

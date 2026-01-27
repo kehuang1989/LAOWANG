@@ -56,7 +56,7 @@ python scoring_fhkq.py    --config config.ini --start-date 2026-01-01 --end-date
 
 ### 4.3 启动 UI
 ```bash
-python ui.py --config config.ini --start-date 20260101
+python ui.py --config config.ini --start-date 20260101 --port 80 --host 0.0.0.0
 # http://127.0.0.1:8000
 ```
 
@@ -70,6 +70,7 @@ python ui.py --config config.ini --start-date 20260101
   - `python tgBot.py --config config.ini --mode serve`：开启轮询，支持随时查询股票池
   - `python tgBot.py --config config.ini --mode push`：手动向订阅者推送当日四个股票池
   - 默认 Token 由 `TG_BOT_TOKEN` 或仓库内置值提供，消息以纯文本发送避免 Markdown 报错
+  - 代理：`--proxy` 默认为 `http://127.0.0.1:7890`，传空/none 关闭，可用 `TG_BOT_PROXY` 覆盖
   - everyday.py 结束后会自动触发推送
 
 ## 6. 常用校验
