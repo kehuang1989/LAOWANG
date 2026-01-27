@@ -66,6 +66,11 @@ python ui.py --config config.ini --start-date 20260101
 - 启动 UI 不会立即触发（需等到当日 17:35）
 - 关闭自动任务：`--disable-auto-update`
 - 调整自动时间：`--auto-time HH:MM`
+- Telegram Bot（可选）：
+  - `python tgBot.py --config config.ini --mode serve`：开启轮询，支持随时查询股票池
+  - `python tgBot.py --config config.ini --mode push`：手动向订阅者推送当日四个股票池
+  - 默认 Token 由 `TG_BOT_TOKEN` 或仓库内置值提供，消息以纯文本发送避免 Markdown 报错
+  - everyday.py 结束后会自动触发推送
 
 ## 6. 常用校验
 
